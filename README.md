@@ -1,5 +1,5 @@
 # UNet_multiclass_segmentation_pytorch
-An simple implementaion of PyTorch UNet segmentation model on VOC2012 dataset, without any complicated structure can be used directly.
+An simple implementaion of PyTorch UNet segmentation model on VOC2012 dataset without any complicated structure, can be used directly.
 
 ## Requirements
 torch == 1.6.0
