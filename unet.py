@@ -1,9 +1,13 @@
-import torch
 import torch.nn as nn
+import torch
+from collections import defaultdict
 
 
-down_feature = []
+# define model
+down_feature = defaultdict(list)
 filter_list = [i for i in range(6, 9)]
+
+
 class down_sampling(nn.Module):
     def __init__(self, in_channel, out_channel):
         super(down_sampling, self).__init__()
@@ -20,7 +24,7 @@ class down_sampling(nn.Module):
 
     def forward(self, in_feat):
         x = self.conv(in_feat)
-        down_feature.append(x)
+        down_feature[in_feat.device.index].append(x)
         x = self.pool(x)
 
         return x
@@ -42,16 +46,16 @@ class up_sampling(nn.Module):
 
     def forward(self, in_feat):
         x = self.up_conv(in_feat)
-        down_map = down_feature.pop()
+        down_map = down_feature[in_feat.device.index].pop()
         x = torch.cat([x, down_map], dim=1)
         x = self.relu_conv(x)
         return x
 
 
 class UNet(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, input_channels, num_classes):
         super(UNet, self).__init__()
-        self.input_conv = down_sampling(3, 64)
+        self.input_conv = down_sampling(input_channels, 64)
         self.down_list = [down_sampling(2 ** i, 2 ** (i + 1)) for i in filter_list]
         self.down = nn.Sequential(*self.down_list)
 
@@ -69,9 +73,7 @@ class UNet(nn.Module):
         self.up = nn.Sequential(*self.up_list)
 
         self.output = nn.Conv2d(64, num_classes, 1)
-        # self.classifier = nn.Softmax()
         
-
 
     def forward(self, in_feat):
         x = self.input_conv(in_feat)
@@ -80,8 +82,6 @@ class UNet(nn.Module):
         x = self.up_init(x)
         x = self.up(x)
         x = self.output(x)
-
-
-        # out = self.classifier(x)
+        # out = self.segment(x)
         # return out
         return x

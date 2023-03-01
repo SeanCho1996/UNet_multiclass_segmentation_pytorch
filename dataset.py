@@ -1,96 +1,145 @@
-from torch.utils.data import Dataset
-import torch
-import cv2
-import numpy as np
-from tqdm import tqdm
+# %%
 import os
-from copy import deepcopy
+from collections.abc import Sequence
+from glob import glob
+from pathlib import Path
+
+import numpy as np
 from PIL import Image
+import torch
+from torch import nn
+from torch.utils.data import Dataset
+from torchvision.transforms import Compose, ToTensor, Normalize, InterpolationMode
+from torchvision.transforms.transforms import Pad, Resize
 
 
-def trainImageFetch(train_folder):
+def image_fetch(train_folder:Path, split_rate:float=0.9):
     image_train = []
-    mask_train = []
-
-    # load images and masks from their folders
-    images_folder = os.path.join(train_folder, "image")
-    masks_folder = os.path.join(train_folder, "mask")
-
-    image_list = os.listdir(images_folder)
-    for idx, image_name in tqdm(enumerate(image_list), total=len(image_list), desc="load train images......"):
-        image_path = os.path.join(images_folder, image_name)
-        mask_path = os.path.join(masks_folder, image_name.split('.')[0] + ".png")
-
-        image = Image.open(image_path)
-        image_train.append(image)
-
-        mask = Image.open(mask_path)
-        mask_train.append(mask)
-
-    return image_train, mask_train
-
-
-def valImageFetch(val_folder):
+    label_train = []
     image_val = []
-    mask_val = []
+    label_val = []
 
-    images_folder = os.path.join(val_folder, "image")
-    masks_folder = os.path.join(val_folder, "mask")
+    # get images and gt folders
+    img_folder = os.path.join(train_folder, f"image")
+    gt_folder = os.path.join(train_folder, f"GT")
 
-    image_list = os.listdir(images_folder)
-    for idx, image_name in tqdm(enumerate(image_list), total=len(image_list), desc="load validation images......"):
-        image_path = os.path.join(images_folder, image_name)
-        mask_path = os.path.join(masks_folder, image_name.split('.')[0] + ".png")
+    # load images from their folder
+    img_list = glob(os.path.join(img_folder, "*.png"))
+    gt_list = []
+    
+    # load corresponding gt
+    for i in img_list[:]:
+        img_name = os.path.basename(i)
+        gt_path = os.path.join(gt_folder, img_name)
+        if os.path.exists(gt_path):
+            gt_list.append(gt_path)
+        else:
+            img_list.remove(i)
+    print(f"total train images: {len(img_list)}")
 
-        image = Image.open(image_path)
-        image_val.append(image)
+    # split train/val
+    split = round(len(img_list) * split_rate)
+    image_train += img_list[:split]
+    label_train += gt_list[:split]
+    image_val += img_list[split:]
+    label_val += gt_list[split:]
 
-        mask = Image.open(mask_path)
-        mask_val.append(mask)
+    return image_train, label_train, image_val, label_val
 
-    return image_val, mask_val
+# %%
+class ResizeSquarePad(nn.Module):
+    def __init__(self, target_length:int, interpolation_strategy:InterpolationMode, pad_value=0):
+        super(ResizeSquarePad, self).__init__()
+        if not isinstance(target_length, (int, Sequence)):
+            raise TypeError(
+                "Size should be int or sequence. Got {}".format(type(target_length)))
+        if isinstance(target_length, Sequence) and len(target_length) not in (1, 2):
+            raise ValueError(
+                "If size is a sequence, it should have 1 or 2 values")
 
+        self.target_length = target_length
+        self.interpolation_strategy = interpolation_strategy
+        self.pad_value = pad_value
 
+    def forward(self, img:Image.Image):
+        w, h = img.size
+        if w > h:
+            target_size = (
+                int(np.round(self.target_length * (h / w))), self.target_length)
+            img = Resize(size=target_size, interpolation=self.interpolation_strategy)(img)
+
+            total_pad = img.size[0] - img.size[1]
+            half_pad = total_pad // 2
+            padding = (0, half_pad, 0, total_pad - half_pad)
+            return Pad(padding=padding, fill=self.pad_value)(img)
+        else:
+            target_size = (self.target_length, int(
+                np.round(self.target_length * (w / h))))
+            img = Resize(size=target_size, interpolation=self.interpolation_strategy)(img)
+
+            total_pad = img.size[1] - img.size[0]
+            half_pad = total_pad // 2
+            padding = (half_pad, 0, total_pad - half_pad, 0)
+            return Pad(padding=padding, fill=self.pad_value)(img)
+
+# %%
 class SegDataset(Dataset):
-    def __init__(self, image_list, mask_list, mode, transform_img, transform_mask):
-        self.mode = mode
-        self.transform_img = transform_img
-        self.transform_mask = transform_mask
-        self.imagelist = image_list
-        self.masklist = mask_list
+    def __init__(self, image_list, label_list):
+        self.transform_img = Compose([
+            ResizeSquarePad(target_length=512, interpolation_strategy=InterpolationMode.BILINEAR),
+            ToTensor(),
+            Normalize([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
+        ])
 
+        self.transform_mask = Compose([
+            ResizeSquarePad(512, InterpolationMode.NEAREST)
+        ])
+
+        self.image_list = []
+
+        for i in range(len(image_list)):
+            self.image_list.append((image_list[i], label_list[i]))
 
     def __len__(self):
-        return len(self.imagelist)
-
+        return len(self.image_list)
 
     def __getitem__(self, idx):
-        image = deepcopy(self.imagelist[idx])
-
-        if self.mode == 'train':
-            mask = deepcopy(self.masklist[idx])
-            # label = np.where(mask.sum() == 0, 1.0, 0.0).astype(np.float32)
-            # print(f'before transform mask max: {np.array(mask).max()}')
-            image = self.transform_img(image)
-
+        img_path, label_path = self.image_list[idx]
+        img = Image.open(img_path)
+        mask = Image.open(label_path)
+        try:
+            img = self.transform_img(img)
             mask = self.transform_mask(mask)
-            mask = torch.as_tensor(np.array(mask), dtype=torch.int64)
-            # print(f'after transform mask max: {mask.max()}')
+            mask = torch.as_tensor(np.array(mask), dtype=torch.int64) # mask transform does not contain to_tensor function
+        except Exception as e:
+            print(img_path)
+            print(e)
 
-            # image = image.unsqueeze(0)
-            # mask = mask.unsqueeze(0)
+        return img, mask
 
-            return image, mask
+# %%
+class PredSegDataset(Dataset):
+    def __init__(self, img_list):
+        super(PredSegDataset, self).__init__()
 
-        elif self.mode == 'val':
-            mask = deepcopy(self.masklist[idx])
+        self.img_list = img_list
+        self.transforms = Compose([
+            ResizeSquarePad(target_length=512, interpolation_strategy=InterpolationMode.BILINEAR),
+            ToTensor(),
+            Normalize([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
+        ])
 
-            image = self.transform_img(image)
+    
+    def __len__(self) -> int:
+        return len(self.img_list)
 
-            mask = self.transform_mask(mask)
-            mask = torch.as_tensor(np.array(mask), dtype=torch.int64)
-
-            # image = image.unsqueeze(0)
-            # mask = mask.unsqueeze(0)
-
-            return image, mask
+    def __getitem__(self, index: int):
+        img = self.img_list[index]
+        img = self.transforms(img)
+        return img
+    
+# %%
+if __name__ == "__main__":
+    image_train, label_train, image_val, label_val = image_fetch(f"./PNG")
+    ds = SegDataset(image_train, label_train)
+    a, b = ds[0]
